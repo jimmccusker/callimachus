@@ -29,7 +29,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -73,7 +75,7 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 	private static final Pattern HOST_POST_REGEX = Pattern
 			.compile("([\\w\\-\\.]+):(\\d+)");
 	private static final DriverConnectionPoolManager manager = new DriverConnectionPoolManager();
-	private static final Map<String, List<Driver>> drivers = new HashMap<>();
+	private static final Map<String, List<Driver>> drivers = new HashMap<String, List<Driver>>();
 	private static final int BATCH_SIZE = 1000;
 
 	private final Logger logger = LoggerFactory
@@ -126,7 +128,11 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 			conn.setAutoCommit(false);
 			verifyTableExists(tablename, conn);
 			conn.createStatement().execute("DELETE FROM \"" + tablename + "\"");
-			loadIntoTable(rows, tablename, conn);
+			if (rows == null) {
+				logger.warn("Cleared table {}", tablename);
+			} else {
+				loadIntoTable(rows, tablename, conn);
+			}
 			conn.commit();
 		} finally {
 			conn.close();
@@ -135,6 +141,8 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 
 	public void loadIntoTable(TupleQueryResult rows, String tablename)
 			throws SQLException, OpenRDFException, IOException {
+		if (rows == null)
+			throw new BadRequest("No content");
 		Connection conn = getConnection();
 		try {
 			conn.setAutoCommit(false);
@@ -245,8 +253,8 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 			OpenRDFException, IOException {
 		Exception cause = null;
 		String url = this.getCalliJdbcUrl();
-		List<String> classnames = new ArrayList<>(this.getCalliDriverClassName());
-		ClassLoader cl = createClassLoader();
+		List<String> classnames = new ArrayList<String>(this.getCalliDriverClassName());
+		URLClassLoader cl = createClassLoader();
 		for (String classname : classnames) {
 			try {
 				Object d = Class.forName(classname, true, cl).newInstance();
@@ -274,6 +282,8 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 					manager.registerDriver(name, driver, url, props, config,
 							this.getCalliValidationQuery());
 					return;
+				} else {
+					logger.error("{} does not accept {}", classname, url);
 				}
 			} catch (ClassNotFoundException e) {
 				cause = e;
@@ -293,11 +303,11 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 		reset();
 		if (cause instanceof SQLException)
 			throw (SQLException) cause;
+		String msg = "Could not load driver " + classnames + " from "
+				+ Arrays.asList(cl.getURLs());
 		if (cause != null)
-			throw new SQLException("Could not load driver "
-					+ classnames, cause);
-		throw new SQLException("Could not load driver "
-				+ classnames);
+			throw new SQLException(msg, cause);
+		throw new SQLException(msg);
 	}
 
 	private Credentials getCredential(String url) throws OpenRDFException,
@@ -313,7 +323,7 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 		return creds.getCredentials(new AuthScope(host, port));
 	}
 
-	private ClassLoader createClassLoader() {
+	private URLClassLoader createClassLoader() {
 		List<URL> urls = new ArrayList<URL>();
 		for (RDFObject jar : this.getCalliDriverJar()) {
 			try {
@@ -377,7 +387,7 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 				BindingSet row = rows.next();
 				for (int i = 0, n = columns.size(); i < n; i++) {
 					String column = columns.get(i);
-					Integer type = columnTypes.get(column);
+					int type = columnTypes.get(column);
 					Value value = row.getValue(column);
 					int col = i + 1;
 					setValue(insert, col, value, type);
@@ -419,7 +429,7 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 
 	private Map<String, Integer> getColumnTypes(String tablename,
 			Connection conn) throws SQLException {
-		Map<String, Integer> columnNames = new LinkedHashMap<>();
+		Map<String, Integer> columnNames = new LinkedHashMap<String, Integer>();
 		ResultSet columns = conn.getMetaData().getColumns(null, null,
 				tablename, null);
 		try {
@@ -433,19 +443,29 @@ public abstract class SqlDatasourceSupport implements SqlDatasource,
 	}
 
 	private void setValue(PreparedStatement insert, int col, Value value,
-			Integer type) throws SQLException {
+			int type) throws SQLException {
 		if (value == null) {
 			insert.setNull(col, type);
 		} else if (value instanceof Literal) {
 			Literal lit = (Literal) value;
 			URI datatype = lit.getDatatype();
-			if (datatype == null) {
-				insert.setString(col, value.stringValue());
-			} else if (XMLDatatypeUtil.isCalendarDatatype(datatype)) {
+			if (Types.TIMESTAMP == type) {
+				GregorianCalendar cal = lit.calendarValue()
+						.toGregorianCalendar();
+				insert.setTimestamp(col,
+						new java.sql.Timestamp(cal.getTimeInMillis()), cal);
+			} else if (Types.DATE == type) {
 				GregorianCalendar cal = lit.calendarValue()
 						.toGregorianCalendar();
 				insert.setDate(col, new java.sql.Date(cal.getTimeInMillis()),
 						cal);
+			} else if (datatype == null) {
+				insert.setString(col, value.stringValue());
+			} else if (XMLDatatypeUtil.isCalendarDatatype(datatype)) {
+				GregorianCalendar cal = lit.calendarValue()
+						.toGregorianCalendar();
+				insert.setTimestamp(col,
+						new java.sql.Timestamp(cal.getTimeInMillis()), cal);
 			} else {
 				insert.setString(col, value.stringValue());
 			}
